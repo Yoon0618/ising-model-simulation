@@ -1,8 +1,14 @@
 from fileinput import filename
 
+import os
 import numpy as np
 import time
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.cm import ScalarMappable
+from matplotlib.colors import LinearSegmentedColormap, LogNorm
 from rich.console import Console
 from rich.table import Table
 from rich.live import Live
@@ -21,6 +27,50 @@ from rich.progress import (
     TimeElapsedColumn,
 )
 console = Console()
+SNAPSHOT_POINTS = (0, 33, 66, 99)
+BETA_SWEEP_COUNT = 50
+BETA_SWEEP_START = 1.0
+BETA_SWEEP_STOP = 0.0001
+
+
+def make_snapshot_steps(total_steps):
+    return {
+        0 if percent == 0 else max(1, int(np.ceil(total_steps * percent / 100))): percent
+        for percent in SNAPSHOT_POINTS
+    }
+
+
+def make_beta_sweep_values(count=BETA_SWEEP_COUNT, start=BETA_SWEEP_START, stop=BETA_SWEEP_STOP):
+    if count < 2:
+        raise ValueError("Beta sweep needs at least two values.")
+    if start <= 0 or stop <= 0:
+        raise ValueError("Beta sweep values must be positive for geometric spacing.")
+    return np.geomspace(start, stop, count)
+
+
+def make_beta_color_mapper(beta_values, cmap_name="beta_temperature"):
+    beta_values = np.asarray(beta_values, dtype=float)
+    if np.any(beta_values <= 0):
+        raise ValueError("Beta values must be positive for log-scaled colors.")
+
+    if cmap_name == "beta_temperature":
+        cmap = LinearSegmentedColormap.from_list(
+            cmap_name,
+            [
+                "#b2182b",
+                "#ef8a62",
+                "#fddbc7",
+                "#d1e5f0",
+                "#4393c3",
+                "#053061",
+            ],
+        )
+    else:
+        cmap = plt.get_cmap(cmap_name)
+    norm = LogNorm(vmin=np.min(beta_values), vmax=np.max(beta_values))
+    mappable = ScalarMappable(norm=norm, cmap=cmap)
+    mappable.set_array([])
+    return cmap, norm, mappable
 
 # State class 정의
 class State:
@@ -93,7 +143,7 @@ class State:
             right_index = index.copy()
 
             left_index[n] = (left_index[n]-1) % self.N
-            right_index[n] = (left_index[n]+1) % self.N
+            right_index[n] = (right_index[n]+1) % self.N
 
             neighborhood_index.append(tuple(left_index))
             neighborhood_index.append(tuple(right_index))
@@ -125,13 +175,25 @@ class State:
         return -self.J * np.sum(Si * Sj)
 
     def theoretical_lowest_energy(self):
-        return -self.J * 1/2 * 4 * 1 * self.N ** self.dim # 두번 샘하므로 1/2, 한 원자의 이웃은 4개이므로 4, SiSj=1일 때 최소이므로 1, 원자 개수.
+        if self.dim == 1:
+            return -self.J * 1/2 * 2 * 1 * self.N ** self.dim # 두번 샘하므로 1/2, 한 원자의 이웃은 2개이므로 2, SiSj=1일 때 최소이므로 1, 원자 개수.
+        elif self.dim == 2:
+            return -self.J * 1/2 * 4 * 1 * self.N ** self.dim # 두번 샘하므로 1/2, 한 원자의 이웃은 4개이므로 4, SiSj=1일 때 최소이므로 1, 원자 개수.
+        elif self.dim == 3:
+            return -self.J * 1/2 * 6 * 1 * self.N ** self.dim # 두번 샘하므로 1/2, 한 원자의 이웃은 6개이므로 6, SiSj=1일 때 최소이므로 1, 원자 개수.
 
     def make_state_plot_text(self):
         if self.dim == 1:
             self._state = np.reshape(self.state, (1, self.N))
-        else: 
+        elif self.dim == 2:
             self._state = self.state
+        elif self.dim == 3:
+            raise NotImplementedError("3D state plot not implemented yet.")
+
+        return "\n".join(
+            "".join("-" if cell == -1 else "+" for cell in row)
+            for row in self._state
+        ) + "\n"
 
         state_plot_text = ""
         for row in self._state:
@@ -155,6 +217,11 @@ class State:
             self._state = np.reshape(self.state, (1, self.N))
         else: 
             self._state = self.state
+
+        print()
+        for row in self._state:
+            print("".join("-" if cell == -1 else "+" for cell in row))
+        return
 
         print()
         for row in self._state:
@@ -188,8 +255,8 @@ def section_title(title):
 def make_info(step, param, model):
     status = "Running" if step < param["step"] - 1 else "Done"
     status_rows = [
-        ("Status", Text("Running", style="green")),
-        ("Step", f"{step}/{param['step']}"),
+        ("Status", Text(f"{status}", style="green")),
+        ("Step", f"{step}/{param['step']-1}"),
         (
             "Ini/Current/Lowest Energy",
             f"{model.initial_energy} / {model.eval_total_energy()} / {model.theoretical_lowest_energy()}",
@@ -212,11 +279,12 @@ def make_info(step, param, model):
             [
                 ("Normalized Temperature (T)", str(param["T"])),
                 ("Normalized Beta (1/kB*T)", str(param["beta"])),
+                # ("hold ratio", f"{1-np.exp(-param['beta']*():.4f}"),
             ]
         )
 
     return Group(
-        section_title("Status"),
+        section_title(f"Shot #{param['shot_number']} Simulation Status"),
         make_kv_grid(status_rows),
         "",
         section_title("Parameter"),
@@ -247,19 +315,30 @@ def make_dashboard(step, param, model):
     )
 
 def run(param, rng_initial_state=None, console=console):
-    rng_MP = np.random.default_rng() # metropolis 방법에서 에너지가 증가했을 때 뒤집기를 유지할지 말지 결정하기 위한 랜덤 넘버 생성기.
+    rng_MP = np.random.default_rng(param.get("mp_seed")) # metropolis 방법에서 에너지가 증가했을 때 뒤집기를 유지할지 말지 결정하기 위한 랜덤 넘버 생성기.
 
     # 초기화
     model = State(N=param["N"], dim=param["dim"], plus_ratio=param["plus_ratio"], rng_initial_state=rng_initial_state, method=param["method"])
-    # steps = np.linspace(0, param["step"])
+    if "simulation_seed" in param:
+        model.rng = np.random.default_rng(param["simulation_seed"])
+    
+    
     steps = np.arange(param["step"])
-    # model.plot()
 
-    ini_total_energy = model.eval_total_energy()
     # print(f"initial total energy = {ini_total_energy}")
 
     energy_history = np.empty_like(steps, dtype=np.int64)
-
+    energy_history[0] = model.eval_total_energy()
+    snapshot_steps = make_snapshot_steps(param["step"])
+    snapshots = [
+        {
+            "percent": snapshot_steps[0],
+            "step": 0,
+            "energy": model.eval_total_energy(),
+            "state": model.state.copy(),
+        }
+    ]
+    
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -278,15 +357,15 @@ def run(param, rng_initial_state=None, console=console):
                 time.sleep(param["sleep"])
 
                 initial_energy = model.eval_total_energy()
-                energy_history[i] = initial_energy
+                
 
                 index = model.random_flip()
                 final_energy = model.eval_total_energy()
                 energy_diff = final_energy - initial_energy
 
-                if final_energy == model.theoretical_lowest_energy(): # 최소 에너지 도달하면 루프 종료 및 steps 슬라이싱
-                    steps = steps[:i]
-                    break
+                # if final_energy == model.theoretical_lowest_energy(): # 최소 에너지 도달하면 루프 종료. 이
+                #     steps = steps[:i]
+                #     break
                 
                 # method에 따라 에너지가 증가했을 때 대처가 다름
                 if param["method"] == "MC": # 에너지가 증가하면 변화 되돌리기
@@ -297,13 +376,27 @@ def run(param, rng_initial_state=None, console=console):
                 
                 elif param["method"] == "MP": # 에너지가 증가했더라도 확률적으로 유지
                     if energy_diff > 0:
-                        flip_ratio = np.exp(-param["beta"]*energy_diff)
-                        coin_toss = rng_MP.choice([0, 1], size=1, p=[1-flip_ratio, flip_ratio])[0]
-
+                        hold_ratio = 1-np.exp(-param["beta"]*energy_diff)
+                        coin_toss = rng_MP.choice([0, 1], size=1, p=[1-hold_ratio, hold_ratio])[0]
+                        # 코인을 던져서 1이면 홀드, 0이면 롤백
                         if coin_toss == 0:
                             model.rollback_flip(index)
                     else:
                         pass
+
+                energy_history[i] = initial_energy
+
+                # 33%, 66%, 100% 진행될 때 상태를 이미지로 플랏해 저장
+                completed_step = i + 1
+                if completed_step in snapshot_steps:
+                    snapshots.append(
+                        {
+                            "percent": snapshot_steps[completed_step],
+                            "step": completed_step,
+                            "energy": model.eval_total_energy(),
+                            "state": model.state.copy(),
+                        }
+                    )
 
                 progress.update(task_id, advance=1)
                 live.update(make_dashboard(i, param, model))
@@ -334,6 +427,7 @@ def run(param, rng_initial_state=None, console=console):
         "steps": steps,
         "energy_history": energy_history,
         "final_state": model.state,
+        "snapshots": snapshots,
         "theoretical_lowest_energy": model.theoretical_lowest_energy(),
         "param": param,
 
@@ -353,7 +447,246 @@ def test():
     return 0
 
 
-def save_results(results):
+def save_results(results_to_save_MC, results_to_save_MP, save_dir="./results"):
+    shot_number = get_shot_number()
+
+    # npz로 결과 저장
+    # 저장 성공하면 shot_tracker.txt에 저장된 샷 번호에 1 더해서 업데이트
+
+    try:
+        np.savez(f"{save_dir}/#{shot_number}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.npz",
+                 steps_MC = results_to_save_MC["steps"],
+                 energy_history_MC = results_to_save_MC["energy_history"],
+                 final_state_MC = results_to_save_MC["final_state"],
+                 
+                 steps_MP = results_to_save_MP["steps"],
+                 energy_history_MP = results_to_save_MP["energy_history"],
+                 final_state_MP = results_to_save_MP["final_state"],
+                 
+                 )
+        shot_number += 1
+        with open("shot_tracker.txt", "w") as f:
+            f.write(str(shot_number))
+
+    except Exception as e:
+        print(f"Error occurred while saving results: {e}")
+
+
+def run_beta_sweep(param_template, beta_values, seed=2026, console=console):
+    beta_values = np.asarray(beta_values, dtype=float)
+    energy_histories = []
+    steps = None
+    theoretical_lowest_energy = None
+
+    for index, beta in enumerate(beta_values, start=1):
+        param = param_template.copy()
+        param["method"] = "MP"
+        param["beta"] = float(beta)
+        param["shot_number"] = f"{param_template.get('shot_number', get_shot_number())} beta {index}/{len(beta_values)}"
+        param["simulation_seed"] = seed
+        param["mp_seed"] = seed + 1
+
+        console.print(f"[cyan]Running MP beta sweep {index}/{len(beta_values)}: beta={beta:.6g}[/cyan]")
+        result = run(
+            param,
+            rng_initial_state=np.random.default_rng(seed=seed),
+            console=console,
+        )
+
+        if steps is None:
+            steps = result["steps"]
+            theoretical_lowest_energy = result["theoretical_lowest_energy"]
+        elif not np.array_equal(steps, result["steps"]):
+            raise ValueError("All beta sweep runs must use the same steps.")
+
+        energy_histories.append(result["energy_history"])
+
+    return {
+        "steps": steps,
+        "beta_values": beta_values,
+        "energy_histories": np.asarray(energy_histories),
+        "theoretical_lowest_energy": theoretical_lowest_energy,
+        "param": param_template.copy(),
+    }
+
+
+def save_beta_sweep_results(
+    steps,
+    beta_values,
+    energy_histories,
+    param,
+    save_dir="./results",
+    shot_number=None,
+):
+    os.makedirs(save_dir, exist_ok=True)
+    if shot_number is None:
+        shot_number = get_shot_number()
+
+    filename = (
+        f"{save_dir}/#{shot_number}_"
+        f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_"
+        "MP_beta_sweep.npz"
+    )
+    np.savez(
+        filename,
+        steps=np.asarray(steps),
+        beta_values=np.asarray(beta_values),
+        energy_histories_MP=np.asarray(energy_histories),
+        method="MP",
+        N=param["N"],
+        dim=param["dim"],
+        step=param["step"],
+        plus_ratio=param.get("plus_ratio", np.nan),
+    )
+    return filename
+
+def state_plot(model, param, i=None, show=False, save_dir="./results"):
+    # state 시각화
+    state = model.state
+    if i is None:
+        filename = f"{save_dir}/#{get_shot_number()}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_{param['method']}.png"
+    else:
+        filename = f"{save_dir}/#{get_shot_number()}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_{param['method']}_step-{i}.png"
+    plt.imshow(state, cmap="coolwarm", vmin=-1, vmax=1)
+    # plt.colorbar(label="Spin State")
+    plt.title(f"{param['method']} - Step {i}" if i is not None else f"{param['method']} - Final State")
+    plt.xlabel("X-axis")
+    plt.ylabel("Y-axis")
+    plt.savefig(f"{filename}", dpi=600)
+    if show:
+        plt.show()
+    plt.close()
+    
+def snapshot_panel_plot(snapshots, param, show=False, save_dir="./results"):
+    os.makedirs(save_dir, exist_ok=True)
+    if len(snapshots) != len(SNAPSHOT_POINTS):
+        raise ValueError(f"Expected {len(SNAPSHOT_POINTS)} snapshots, got {len(snapshots)}.")
+
+    method_name = {
+        "MC": "Monte Carlo",
+        "MP": "Metropolis",
+    }.get(param["method"], str(param["method"]))
+
+    fig, axes = plt.subplots(1, len(snapshots), figsize=(14, 4.2), constrained_layout=True)
+    fig.suptitle(
+        f"{method_name} Spin State Snapshots (N={param['N']}, steps={param['step']})",
+        fontsize=15,
+        fontweight="bold",
+    )
+
+    image = None
+    for ax, snapshot in zip(axes, snapshots):
+        image = ax.imshow(
+            snapshot["state"],
+            cmap="coolwarm",
+            vmin=-1,
+            vmax=1,
+            interpolation="nearest",
+        )
+        ax.set_title(
+            f"{snapshot['percent']}% | Step {snapshot['step']}\nEnergy = {snapshot['energy']:.0f}",
+            fontsize=10,
+        )
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_linewidth(1.2)
+            spine.set_color("#444444")
+
+    colorbar = fig.colorbar(image, ax=axes, shrink=0.72, pad=0.012)
+    colorbar.set_ticks([-1, 1])
+    colorbar.set_ticklabels(["-1 spin", "+1 spin"])
+
+    filename = (
+        f"{save_dir}/#{get_shot_number()}_"
+        f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_"
+        f"{param['method']}_snapshots.png"
+    )
+    plt.savefig(filename, dpi=600, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+    return filename
+
+def comparison_plot_results(results_MC, results_MP, show=False, save_dir="./results"):
+
+    # comparison of these method
+    plt.plot(results_MC["steps"], results_MC["energy_history"], label="Monte-Carlo")
+    plt.plot(results_MP["steps"], results_MP["energy_history"], label="Metropolis")
+    plt.xlabel("Steps")
+    plt.ylabel("Normalized Energy")
+
+
+    # 초기 에너지
+    plt.axhline(y=results_MC["energy_history"][0], color='g', linestyle='--', label="initial energy")
+    # theoretical lowest energy
+    plt.axhline(y=results_MC["theoretical_lowest_energy"], color='r', linestyle='--', label="theoretical lowest energy")
+
+
+    plt.legend()
+    plt.grid()
+    plt.savefig(f"{save_dir}/#{get_shot_number()}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.png", dpi=600)
+    if show:
+        plt.show()
+    plt.close()
+
+
+def beta_sweep_comparison_plot_results(results, show=False, save_dir="./results", shot_number=None, cmap_name="beta_temperature"):
+    os.makedirs(save_dir, exist_ok=True)
+    if shot_number is None:
+        shot_number = get_shot_number()
+
+    steps = results["steps"]
+    beta_values = results["beta_values"]
+    energy_histories = results["energy_histories"]
+
+    fig, ax = plt.subplots(figsize=(11, 6.5), constrained_layout=True)
+    cmap, norm, mappable = make_beta_color_mapper(beta_values, cmap_name=cmap_name)
+
+    for beta, energy_history in zip(beta_values, energy_histories):
+        ax.plot(
+            steps,
+            energy_history,
+            color=cmap(norm(beta)),
+            linewidth=1.0,
+            alpha=0.85,
+        )
+
+    ax.set_title("Metropolis Energy History by Beta")
+    ax.set_xlabel("Steps")
+    ax.set_ylabel("Energy")
+    ax.axhline(
+        y=energy_histories[0][0],
+        color="g",
+        linestyle="--",
+        linewidth=1,
+        label="initial energy",
+    )
+    ax.axhline(
+        y=results["theoretical_lowest_energy"],
+        color="r",
+        linestyle="--",
+        linewidth=1,
+        label="theoretical lowest energy",
+    )
+    ax.grid(True, alpha=0.3)
+
+    colorbar = fig.colorbar(mappable, ax=ax, pad=0.02)
+    colorbar.set_label("beta")
+
+    color_tag = "" if cmap_name == "beta_temperature" else f"_{cmap_name}"
+    filename = (
+        f"{save_dir}/#{shot_number}_"
+        f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_"
+        f"MP_beta_sweep{color_tag}.png"
+    )
+    plt.savefig(filename, dpi=600, bbox_inches="tight")
+    if show:
+        plt.show()
+    plt.close(fig)
+    return filename
+
+def get_shot_number():
     # shot_tracker.txt 파일이 없으면 만들고, 있으면 값 읽기
     # shot_tracker.txt에는 샷 번호를 나타내는 정수값 하나가 저장되어 있음
     try:
@@ -364,38 +697,26 @@ def save_results(results):
             f.write("0")
         shot_number = 0
 
-    # npz로 결과 저장
-    # 저장 성공하면 shot_tracker.txt에 저장된 샷 번호에 1 더해서 업데이트
-    try:
-        np.savez(f"#{shot_number}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.npz",
-                 steps_MP = results["steps_MP"],
-                 energy_history_MP = results["energy_history_MP"],
-                 final_state_MP = results["final_state_MP"],
-                 model_MP = results["model_MP"],
-                 steps_MC = results["steps_MC"],
-                 energy_history_MC = results["energy_history_MC"],
-                 final_state_MC = results["final_state_MC"],
-                 model_MC = results["model_MC"],
-                 )
-        shot_number += 1
-        with open("shot_tracker.txt", "w") as f:
-            f.write(str(shot_number))
+    return shot_number
 
-    except Exception as e:
-        print(f"Error occurred while saving results: {e}")
 
 def main():
+    # read shot number from shot_tracker.txt, if not exist, create one and initialize with 0
+    shot_number = get_shot_number()
+    save_dir = "./results"
+
     param_MC = {
         "method": "MC",
         "dim": 2, # 차원
         "N": 20, # 그리드 개수
         "plus_ratio": 0.5, # 초기 +- 생성 비율
         "T": 1.0, # 온도, 정규화
-        "beta": 1.0, # 1/kB*T, kB는 볼츠만 상수, T는 온도. 정규화 했으므로 kB=1로 생각하면 됨. 
+        "beta": 0.05, # 1/kB*T, kB는 볼츠만 상수, T는 온도. 정규화 했으므로 kB=1로 생각하면 됨. 
 
-        "step": 1000, # 총 스텝 수
+        "step": 10000, # 총 스텝 수
         "sleep": 0, # 각 스텝마다 대기 시간 (초)
         "plot": False, # 에너지 변화 그래프 그릴지 여부
+        "shot_number": shot_number, # 샷 번호, 결과 저장할 때 파일 이름에 포함됨
 
     }
 
@@ -404,6 +725,31 @@ def main():
 
 
     seed = 2026
+    beta_values = make_beta_sweep_values()
+    beta_sweep_results = run_beta_sweep(
+        param_MP,
+        beta_values,
+        seed=seed,
+        console=console,
+    )
+    save_beta_sweep_results(
+        steps=beta_sweep_results["steps"],
+        beta_values=beta_sweep_results["beta_values"],
+        energy_histories=beta_sweep_results["energy_histories"],
+        param=param_MP,
+        save_dir=save_dir,
+        shot_number=shot_number,
+    )
+    beta_sweep_comparison_plot_results(
+        beta_sweep_results,
+        show=False,
+        save_dir=save_dir,
+        shot_number=shot_number,
+    )
+    with open("shot_tracker.txt", "w") as f:
+        f.write(str(shot_number + 1))
+    return
+
     rng_initial_state_1 = np.random.default_rng(seed=seed)
     rng_initial_state_2 = np.random.default_rng(seed=seed)
 
@@ -411,38 +757,33 @@ def main():
     results_MC = run(param_MC, rng_initial_state=rng_initial_state_1)
     results_MP = run(param_MP, rng_initial_state=rng_initial_state_2)
 
+    snapshot_panel_plot(results_MC["snapshots"], param_MC, show=False, save_dir=save_dir)
+    snapshot_panel_plot(results_MP["snapshots"], param_MP, show=False, save_dir=save_dir)
+
+    # plot results
+    comparison_plot_results(results_MC, results_MP, show=False, save_dir=save_dir)
+
     # save results
-    results = {
-        "steps_MC": results_MC["steps"],
-        "energy_history_MC": results_MC["energy_history"],
-        "final_state_MC": results_MC["final_state"],
-        "N_MC": results_MC["param"]["N"],
-        "dim_MC": results_MC["param"]["dim"],
-        
-        "steps_MP": results_MP["steps"],
-        "energy_history_MP": results_MP["energy_history"],
-        "final_state_MP": results_MP["final_state"],
-        "N_MP": results_MP["param"]["N"],
-        "dim_MP": results_MP["param"]["dim"],
+    results_to_save_MC = {
+        "steps": results_MC["steps"],
+        "energy_history": results_MC["energy_history"],
+        "final_state": results_MC["final_state"],
+        "N": results_MC["param"]["N"],
+        "dim": results_MC["param"]["dim"],
     }
-    save_results(results)
+
+    results_to_save_MP = {
+        "steps": results_MP["steps"],
+        "energy_history": results_MP["energy_history"],
+        "final_state": results_MP["final_state"],
+        "N": results_MP["param"]["N"],
+        "dim": results_MP["param"]["dim"],
+    }
+
+    save_results(results_to_save_MC, results_to_save_MP)
 
 
-    # comparison of these method
-    plt.plot(results_MC["steps"], results_MC["energy_history"], label="MC")
-    plt.plot(results_MP["steps"], results_MP["energy_history"], label="MP")
-    plt.xlabel("Steps")
-    plt.ylabel("Normalized Energy")
-
-    # theoretical lowest energy
-    plt.axhline(y=results_MC["theoretical_lowest_energy"], color='r', linestyle='--', label="theoretical lowest energy")
-    # 초기 에너지
-    plt.axhline(y=results_MC["energy_history"][0], color='g', linestyle='--', label="initial energy")
-
-    plt.legend()
-    plt.grid()
-    plt.savefig(f"comparison_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.png", dpi=600)
-    plt.show()
+    
 
 if __name__ == '__main__':
     main()
