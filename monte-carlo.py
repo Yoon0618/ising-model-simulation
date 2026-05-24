@@ -2,6 +2,9 @@ from fileinput import filename
 
 import numpy as np
 import time
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from rich.console import Console
 from rich.table import Table
@@ -93,7 +96,7 @@ class State:
             right_index = index.copy()
 
             left_index[n] = (left_index[n]-1) % self.N
-            right_index[n] = (left_index[n]+1) % self.N
+            right_index[n] = (right_index[n]+1) % self.N
 
             neighborhood_index.append(tuple(left_index))
             neighborhood_index.append(tuple(right_index))
@@ -125,13 +128,20 @@ class State:
         return -self.J * np.sum(Si * Sj)
 
     def theoretical_lowest_energy(self):
-        return -self.J * 1/2 * 4 * 1 * self.N ** self.dim # 두번 샘하므로 1/2, 한 원자의 이웃은 4개이므로 4, SiSj=1일 때 최소이므로 1, 원자 개수.
+        if self.dim == 1:
+            return -self.J * 1/2 * 2 * 1 * self.N ** self.dim # 두번 샘하므로 1/2, 한 원자의 이웃은 2개이므로 2, SiSj=1일 때 최소이므로 1, 원자 개수.
+        elif self.dim == 2:
+            return -self.J * 1/2 * 4 * 1 * self.N ** self.dim # 두번 샘하므로 1/2, 한 원자의 이웃은 4개이므로 4, SiSj=1일 때 최소이므로 1, 원자 개수.
+        elif self.dim == 3:
+            return -self.J * 1/2 * 6 * 1 * self.N ** self.dim # 두번 샘하므로 1/2, 한 원자의 이웃은 6개이므로 6, SiSj=1일 때 최소이므로 1, 원자 개수.
 
     def make_state_plot_text(self):
         if self.dim == 1:
             self._state = np.reshape(self.state, (1, self.N))
-        else: 
+        elif self.dim == 2:
             self._state = self.state
+        elif self.dim == 3:
+            raise NotImplementedError("3D state plot not implemented yet.")
 
         state_plot_text = ""
         for row in self._state:
@@ -188,8 +198,8 @@ def section_title(title):
 def make_info(step, param, model):
     status = "Running" if step < param["step"] - 1 else "Done"
     status_rows = [
-        ("Status", Text("Running", style="green")),
-        ("Step", f"{step}/{param['step']}"),
+        ("Status", Text(f"{status}", style="green")),
+        ("Step", f"{step}/{param['step']-1}"),
         (
             "Ini/Current/Lowest Energy",
             f"{model.initial_energy} / {model.eval_total_energy()} / {model.theoretical_lowest_energy()}",
@@ -216,7 +226,7 @@ def make_info(step, param, model):
         )
 
     return Group(
-        section_title("Status"),
+        section_title(f"Shot #{param['shot_number']} Simulation Status"),
         make_kv_grid(status_rows),
         "",
         section_title("Parameter"),
@@ -251,15 +261,15 @@ def run(param, rng_initial_state=None, console=console):
 
     # 초기화
     model = State(N=param["N"], dim=param["dim"], plus_ratio=param["plus_ratio"], rng_initial_state=rng_initial_state, method=param["method"])
-    # steps = np.linspace(0, param["step"])
+    
+    
     steps = np.arange(param["step"])
-    # model.plot()
 
-    ini_total_energy = model.eval_total_energy()
     # print(f"initial total energy = {ini_total_energy}")
 
     energy_history = np.empty_like(steps, dtype=np.int64)
-
+    energy_history[0] = model.eval_total_energy()
+    
     progress = Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -278,15 +288,15 @@ def run(param, rng_initial_state=None, console=console):
                 time.sleep(param["sleep"])
 
                 initial_energy = model.eval_total_energy()
-                energy_history[i] = initial_energy
+                
 
                 index = model.random_flip()
                 final_energy = model.eval_total_energy()
                 energy_diff = final_energy - initial_energy
 
-                if final_energy == model.theoretical_lowest_energy(): # 최소 에너지 도달하면 루프 종료 및 steps 슬라이싱
-                    steps = steps[:i]
-                    break
+                # if final_energy == model.theoretical_lowest_energy(): # 최소 에너지 도달하면 루프 종료. 이
+                #     steps = steps[:i]
+                #     break
                 
                 # method에 따라 에너지가 증가했을 때 대처가 다름
                 if param["method"] == "MC": # 에너지가 증가하면 변화 되돌리기
@@ -304,6 +314,12 @@ def run(param, rng_initial_state=None, console=console):
                             model.rollback_flip(index)
                     else:
                         pass
+
+                energy_history[i] = initial_energy
+
+                # 33%, 66%, 100% 진행될 때 상태를 이미지로 플랏해 저장
+                if i in [int(param["step"]*0.33), int(param["step"]*0.66), param["step"]-2]:
+                    state_plot(model, i=i, param=param, show=False)
 
                 progress.update(task_id, advance=1)
                 live.update(make_dashboard(i, param, model))
@@ -353,7 +369,70 @@ def test():
     return 0
 
 
-def save_results(results):
+def save_results(results_to_save_MC, results_to_save_MP, save_dir="./results"):
+    shot_number = get_shot_number()
+
+    # npz로 결과 저장
+    # 저장 성공하면 shot_tracker.txt에 저장된 샷 번호에 1 더해서 업데이트
+
+    try:
+        np.savez(f"{save_dir}/#{shot_number}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.npz",
+                 steps_MC = results_to_save_MC["steps"],
+                 energy_history_MC = results_to_save_MC["energy_history"],
+                 final_state_MC = results_to_save_MC["final_state"],
+                 
+                 steps_MP = results_to_save_MP["steps"],
+                 energy_history_MP = results_to_save_MP["energy_history"],
+                 final_state_MP = results_to_save_MP["final_state"],
+                 
+                 )
+        shot_number += 1
+        with open("shot_tracker.txt", "w") as f:
+            f.write(str(shot_number))
+
+    except Exception as e:
+        print(f"Error occurred while saving results: {e}")
+
+def state_plot(model, param, i=None, show=False, save_dir="./results"):
+    # state 시각화
+    state = model.state
+    if i is None:
+        filename = f"{save_dir}/#{get_shot_number()}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_{param['method']}.png"
+    else:
+        filename = f"{save_dir}/#{get_shot_number()}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_{param['method']}_step-{i}.png"
+    plt.imshow(state, cmap="coolwarm", vmin=-1, vmax=1)
+    # plt.colorbar(label="Spin State")
+    plt.title(f"{param['method']} - Step {i}" if i is not None else f"{param['method']} - Final State")
+    plt.xlabel("X-axis")
+    plt.ylabel("Y-axis")
+    plt.savefig(f"{filename}", dpi=600)
+    if show:
+        plt.show()
+    plt.close()
+    
+def comparison_plot_results(results_MC, results_MP, show=False, save_dir="./results"):
+
+    # comparison of these method
+    plt.plot(results_MC["steps"], results_MC["energy_history"], label="Monte-Carlo")
+    plt.plot(results_MP["steps"], results_MP["energy_history"], label="Metropolis")
+    plt.xlabel("Steps")
+    plt.ylabel("Normalized Energy")
+
+
+    # 초기 에너지
+    plt.axhline(y=results_MC["energy_history"][0], color='g', linestyle='--', label="initial energy")
+    # theoretical lowest energy
+    plt.axhline(y=results_MC["theoretical_lowest_energy"], color='r', linestyle='--', label="theoretical lowest energy")
+
+
+    plt.legend()
+    plt.grid()
+    plt.savefig(f"{save_dir}/#{get_shot_number()}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.png", dpi=600)
+    if show:
+        plt.show()
+    plt.close()
+
+def get_shot_number():
     # shot_tracker.txt 파일이 없으면 만들고, 있으면 값 읽기
     # shot_tracker.txt에는 샷 번호를 나타내는 정수값 하나가 저장되어 있음
     try:
@@ -364,27 +443,14 @@ def save_results(results):
             f.write("0")
         shot_number = 0
 
-    # npz로 결과 저장
-    # 저장 성공하면 shot_tracker.txt에 저장된 샷 번호에 1 더해서 업데이트
-    try:
-        np.savez(f"#{shot_number}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.npz",
-                 steps_MP = results["steps_MP"],
-                 energy_history_MP = results["energy_history_MP"],
-                 final_state_MP = results["final_state_MP"],
-                 model_MP = results["model_MP"],
-                 steps_MC = results["steps_MC"],
-                 energy_history_MC = results["energy_history_MC"],
-                 final_state_MC = results["final_state_MC"],
-                 model_MC = results["model_MC"],
-                 )
-        shot_number += 1
-        with open("shot_tracker.txt", "w") as f:
-            f.write(str(shot_number))
+    return shot_number
 
-    except Exception as e:
-        print(f"Error occurred while saving results: {e}")
 
 def main():
+    # read shot number from shot_tracker.txt, if not exist, create one and initialize with 0
+    shot_number = get_shot_number()
+    save_dir = "./results"
+
     param_MC = {
         "method": "MC",
         "dim": 2, # 차원
@@ -396,6 +462,7 @@ def main():
         "step": 1000, # 총 스텝 수
         "sleep": 0, # 각 스텝마다 대기 시간 (초)
         "plot": False, # 에너지 변화 그래프 그릴지 여부
+        "shot_number": shot_number, # 샷 번호, 결과 저장할 때 파일 이름에 포함됨
 
     }
 
@@ -411,38 +478,30 @@ def main():
     results_MC = run(param_MC, rng_initial_state=rng_initial_state_1)
     results_MP = run(param_MP, rng_initial_state=rng_initial_state_2)
 
+    # plot results
+    comparison_plot_results(results_MC, results_MP, show=True)
+
     # save results
-    results = {
-        "steps_MC": results_MC["steps"],
-        "energy_history_MC": results_MC["energy_history"],
-        "final_state_MC": results_MC["final_state"],
-        "N_MC": results_MC["param"]["N"],
-        "dim_MC": results_MC["param"]["dim"],
-        
-        "steps_MP": results_MP["steps"],
-        "energy_history_MP": results_MP["energy_history"],
-        "final_state_MP": results_MP["final_state"],
-        "N_MP": results_MP["param"]["N"],
-        "dim_MP": results_MP["param"]["dim"],
+    results_to_save_MC = {
+        "steps": results_MC["steps"],
+        "energy_history": results_MC["energy_history"],
+        "final_state": results_MC["final_state"],
+        "N": results_MC["param"]["N"],
+        "dim": results_MC["param"]["dim"],
     }
-    save_results(results)
+
+    results_to_save_MP = {
+        "steps": results_MP["steps"],
+        "energy_history": results_MP["energy_history"],
+        "final_state": results_MP["final_state"],
+        "N": results_MP["param"]["N"],
+        "dim": results_MP["param"]["dim"],
+    }
+
+    save_results(results_to_save_MC, results_to_save_MP)
 
 
-    # comparison of these method
-    plt.plot(results_MC["steps"], results_MC["energy_history"], label="MC")
-    plt.plot(results_MP["steps"], results_MP["energy_history"], label="MP")
-    plt.xlabel("Steps")
-    plt.ylabel("Normalized Energy")
-
-    # theoretical lowest energy
-    plt.axhline(y=results_MC["theoretical_lowest_energy"], color='r', linestyle='--', label="theoretical lowest energy")
-    # 초기 에너지
-    plt.axhline(y=results_MC["energy_history"][0], color='g', linestyle='--', label="initial energy")
-
-    plt.legend()
-    plt.grid()
-    plt.savefig(f"comparison_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.png", dpi=600)
-    plt.show()
+    
 
 if __name__ == '__main__':
     main()
