@@ -8,7 +8,7 @@
     랜덤 자석 플립
     에너지 계산
     에너지 변화 계산
-    롤백 또는 유지
+    에너지 증가 시 Metropolis 확률로 유지 또는 롤백
 
 최종 결과 보고
 
@@ -20,10 +20,9 @@ import time
 
 # State class 정의
 class State:
-    def __init__(self, N, dim, method, plus_ratio=0.5):
+    def __init__(self, N, dim, plus_ratio=0.5):
         self.N = N
         self.dim = dim
-        self.method = method
         self.plus_ratio = plus_ratio
 
         rng = np.random.default_rng(seed=2026)
@@ -58,7 +57,7 @@ class State:
 
 
 # 초기화
-model = model.init(N=6, dim=1, plus_ratio=0.5, method="MC") # State 클래스?
+model = model.init(N=6, dim=1, plus_ratio=0.5) # State 클래스?
 ts = np.linspace(0, T, dt)
 model.plot()
 
@@ -73,9 +72,9 @@ for t in ts:
     energy_difference = final_energy - initial_energy
 
     if energy_difference > 0:
-        model.rollback_flip()
-    else:
-        pass
+        accept_probability = np.exp(-beta * energy_difference)
+        if rng.choice([0, 1], p=[1 - accept_probability, accept_probability]) == 0:
+            model.rollback_flip()
 
 # 최종 결과
 model.plot()

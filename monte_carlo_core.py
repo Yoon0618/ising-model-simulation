@@ -4,10 +4,9 @@ import numpy as np
 
 
 class State:
-    def __init__(self, N, dim, method, rng_initial_state=None, plus_ratio=0.5):
+    def __init__(self, N, dim, rng_initial_state=None, plus_ratio=0.5):
         self.N = N
         self.dim = dim
-        self.method = method
         self.plus_ratio = plus_ratio
         self.J = 1
         self.flip_ratio = 0.3
@@ -104,22 +103,15 @@ def get_snapshot_steps(step_count):
     }
 
 
-def apply_acceptance_rule(model, method, beta, energy_diff, flipped_index, rng_MP):
-    if method == "MC":
-        if energy_diff > 0:
-            model.rollback_flip(flipped_index)
+def accept_metropolis_flip(model, beta, energy_diff, flipped_index, rng_metropolis):
+    if energy_diff <= 0:
         return
 
-    if method == "MP":
-        if energy_diff > 0:
-            flip_ratio = np.exp(-beta * energy_diff)
-            coin_toss = rng_MP.choice([0, 1], size=1, p=[1 - flip_ratio, flip_ratio])[0]
+    flip_ratio = np.exp(-beta * energy_diff)
+    coin_toss = rng_metropolis.choice([0, 1], size=1, p=[1 - flip_ratio, flip_ratio])[0]
 
-            if coin_toss == 0:
-                model.rollback_flip(flipped_index)
-        return
-
-    raise ValueError(f"Unknown method: {method}")
+    if coin_toss == 0:
+        model.rollback_flip(flipped_index)
 
 
 def run_simulation(
@@ -129,13 +121,12 @@ def run_simulation(
     on_step=None,
     on_snapshot=None,
 ):
-    rng_MP = np.random.default_rng()
+    rng_metropolis = np.random.default_rng()
     model = State(
         N=param["N"],
         dim=param["dim"],
         plus_ratio=param["plus_ratio"],
         rng_initial_state=rng_initial_state,
-        method=param["method"],
     )
 
     steps = np.arange(param["step"])
@@ -159,13 +150,12 @@ def run_simulation(
             final_energy = model.eval_total_energy()
             energy_diff = final_energy - initial_energy
 
-            apply_acceptance_rule(
+            accept_metropolis_flip(
                 model=model,
-                method=param["method"],
                 beta=param["beta"],
                 energy_diff=energy_diff,
                 flipped_index=flipped_index,
-                rng_MP=rng_MP,
+                rng_metropolis=rng_metropolis,
             )
 
             energy_history[i] = initial_energy
@@ -195,33 +185,30 @@ def run_simulation(
     }
 
 
-def save_results(results_to_save_MC, results_to_save_MP, save_dir="./results"):
-    shot_number = get_shot_number()
+def save_results(results_to_save, save_dir="./results", shot_tracker_path="shot_tracker.txt"):
+    shot_number = get_shot_number(shot_tracker_path)
 
     try:
         np.savez(
             f"{save_dir}/#{shot_number}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.npz",
-            steps_MC=results_to_save_MC["steps"],
-            energy_history_MC=results_to_save_MC["energy_history"],
-            final_state_MC=results_to_save_MC["final_state"],
-            steps_MP=results_to_save_MP["steps"],
-            energy_history_MP=results_to_save_MP["energy_history"],
-            final_state_MP=results_to_save_MP["final_state"],
+            steps=results_to_save["steps"],
+            energy_history=results_to_save["energy_history"],
+            final_state=results_to_save["final_state"],
         )
         shot_number += 1
-        with open("shot_tracker.txt", "w") as f:
+        with open(shot_tracker_path, "w") as f:
             f.write(str(shot_number))
 
     except Exception as e:
         print(f"Error occurred while saving results: {e}")
 
 
-def get_shot_number():
+def get_shot_number(shot_tracker_path="shot_tracker.txt"):
     try:
-        with open("shot_tracker.txt", "r") as f:
+        with open(shot_tracker_path, "r") as f:
             shot_number = int(f.read().strip())
     except FileNotFoundError:
-        with open("shot_tracker.txt", "w") as f:
+        with open(shot_tracker_path, "w") as f:
             f.write("0")
         shot_number = 0
 

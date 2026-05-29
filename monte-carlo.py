@@ -86,19 +86,13 @@ def make_info(step, param, model):
     ]
 
     parameter_rows = [
-        ("Method", Text(str(param["method"]), style="yellow")),
+        ("Algorithm", Text("Metropolis", style="yellow")),
         ("Dimension", str(param["dim"])),
         ("Grid size", str(param["N"])),
         ("Initial plus ratio", str(param["plus_ratio"])),
+        ("Normalized Temperature (T)", str(param["T"])),
+        ("Normalized Beta (1/kB*T)", str(param["beta"])),
     ]
-
-    if param["method"] == "MP":
-        parameter_rows.extend(
-            [
-                ("Normalized Temperature (T)", str(param["T"])),
-                ("Normalized Beta (1/kB*T)", str(param["beta"])),
-            ]
-        )
 
     return Group(
         section_title(f"Shot #{param['shot_number']} Simulation Status"),
@@ -177,7 +171,7 @@ def plot_energy_history(results):
     plt.xlabel("time (s)")
     plt.ylabel("Energy (J)")
     plt.savefig(
-        f"{param['method']}_dim{param['dim']}_N{param['N']}_step{param['step']}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.png",
+        f"metropolis_dim{param['dim']}_N{param['N']}_step{param['step']}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.png",
         dpi=600,
     )
     plt.show()
@@ -189,16 +183,16 @@ def state_plot(model, param, i=None, show=False, save_dir="./results"):
     if i is None:
         filename = (
             f"{save_dir}/#{get_shot_number()}_"
-            f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_{param['method']}.png"
+            f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_metropolis.png"
         )
     else:
         filename = (
             f"{save_dir}/#{get_shot_number()}_"
-            f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_{param['method']}_step-{i}.png"
+            f"{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_metropolis_step-{i}.png"
         )
 
     plt.imshow(state, cmap="coolwarm", vmin=-1, vmax=1)
-    plt.title(f"{param['method']} - Step {i}" if i is not None else f"{param['method']} - Final State")
+    plt.title(f"Metropolis - Step {i}" if i is not None else "Metropolis - Final State")
     plt.xlabel("X-axis")
     plt.ylabel("Y-axis")
     plt.savefig(f"{filename}", dpi=600)
@@ -207,36 +201,10 @@ def state_plot(model, param, i=None, show=False, save_dir="./results"):
     plt.close()
 
 
-def comparison_plot_results(results_MC, results_MP, show=False, save_dir="./results"):
-    plt.plot(results_MC["steps"], results_MC["energy_history"], label="Monte-Carlo")
-    plt.plot(results_MP["steps"], results_MP["energy_history"], label="Metropolis")
-    plt.xlabel("Steps")
-    plt.ylabel("Normalized Energy")
-
-    plt.axhline(y=results_MC["energy_history"][0], color="g", linestyle="--", label="initial energy")
-    plt.axhline(
-        y=results_MC["theoretical_lowest_energy"],
-        color="r",
-        linestyle="--",
-        label="theoretical lowest energy",
-    )
-
-    plt.legend()
-    plt.grid()
-    plt.savefig(
-        f"{save_dir}/#{get_shot_number()}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.png",
-        dpi=600,
-    )
-    if show:
-        plt.show()
-    plt.close()
-
-
 def main():
     shot_number = get_shot_number()
 
-    param_MC = {
-        "method": "MC",
+    param = {
         "dim": 2,
         "N": 20,
         "plus_ratio": 0.5,
@@ -248,35 +216,20 @@ def main():
         "shot_number": shot_number,
     }
 
-    param_MP = param_MC.copy()
-    param_MP["method"] = "MP"
-
     seed = 2026
-    rng_initial_state_1 = np.random.default_rng(seed=seed)
-    rng_initial_state_2 = np.random.default_rng(seed=seed)
+    rng_initial_state = np.random.default_rng(seed=seed)
 
-    results_MC = run(param_MC, rng_initial_state=rng_initial_state_1)
-    results_MP = run(param_MP, rng_initial_state=rng_initial_state_2)
+    results = run(param, rng_initial_state=rng_initial_state)
 
-    comparison_plot_results(results_MC, results_MP, show=True)
-
-    results_to_save_MC = {
-        "steps": results_MC["steps"],
-        "energy_history": results_MC["energy_history"],
-        "final_state": results_MC["final_state"],
-        "N": results_MC["param"]["N"],
-        "dim": results_MC["param"]["dim"],
+    results_to_save = {
+        "steps": results["steps"],
+        "energy_history": results["energy_history"],
+        "final_state": results["final_state"],
+        "N": results["param"]["N"],
+        "dim": results["param"]["dim"],
     }
 
-    results_to_save_MP = {
-        "steps": results_MP["steps"],
-        "energy_history": results_MP["energy_history"],
-        "final_state": results_MP["final_state"],
-        "N": results_MP["param"]["N"],
-        "dim": results_MP["param"]["dim"],
-    }
-
-    save_results(results_to_save_MC, results_to_save_MP)
+    save_results(results_to_save)
 
 
 def test():
