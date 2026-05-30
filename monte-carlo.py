@@ -1,7 +1,12 @@
 import time
+import sys
+from pathlib import Path
 
 import matplotlib
 import numpy as np
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -77,7 +82,7 @@ def make_info(step, param, model):
         ("Step", f"{step}/{param['step'] - 1}"),
         (
             "Ini/Current/Lowest Energy",
-            f"{model.initial_energy} / {model.eval_total_energy()} / {model.theoretical_lowest_energy()}",
+            f"{model.initial_energy} / {model.total_energy} / {model.theoretical_lowest_energy()}",
         ),
         (
             "plus/minus count",
@@ -164,17 +169,38 @@ def run(param, rng_initial_state=None, console=console):
     return results
 
 
-def plot_energy_history(results):
-    param = results["param"]
+def plot_energy_history(results, save_dir="./results"):
+    save_path = Path(save_dir)
+    save_path.mkdir(parents=True, exist_ok=True)
 
-    plt.plot(results["steps"], results["energy_history"])
-    plt.xlabel("time (s)")
-    plt.ylabel("Energy (J)")
+    plt.plot(results["steps"], results["energy_history"], label="Metropolis")
+    plt.xlabel("Steps")
+    plt.ylabel("Normalized Energy")
+
+    plt.axhline(
+        y=results["energy_history"][0],
+        color="g",
+        linestyle="--",
+        label="initial energy",
+    )
+    plt.axhline(
+        y=results["theoretical_lowest_energy"],
+        color="r",
+        linestyle="--",
+        label="theoretical lowest energy",
+    )
+
+    plt.legend()
+    plt.grid()
+
+    filename = (
+        save_path
+        / f"#{get_shot_number()}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}_energy_history.png"
+    )
     plt.savefig(
-        f"metropolis_dim{param['dim']}_N{param['N']}_step{param['step']}_{time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime())}.png",
+        filename,
         dpi=600,
     )
-    plt.show()
     plt.close()
 
 
@@ -206,13 +232,13 @@ def main():
 
     param = {
         "dim": 2,
-        "N": 20,
+        "N": 100,
         "plus_ratio": 0.5,
         "T": 1.0,
         "beta": 1.0,
-        "step": 1000,
+        "step": 10000,
         "sleep": 0,
-        "plot": False,
+        "plot": True,
         "shot_number": shot_number,
     }
 

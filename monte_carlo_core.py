@@ -33,7 +33,9 @@ class State:
                 [-1, +1], size=self.size, p=[1 - plus_ratio, plus_ratio]
             )
 
-        self.initial_energy = self.eval_total_energy()
+        self.neighborhood_table = self.make_neighborhood_table()
+        self.total_energy = self.eval_total_energy()
+        self.initial_energy = self.total_energy
 
     def counter(self):
         return {
@@ -41,10 +43,15 @@ class State:
             "minus": np.count_nonzero(self.state == -1),
         }
 
-    def get_neighborhood_index(self, index):
+    def _normalize_index(self, index):
+        if np.isscalar(index):
+            return (int(index),)
+
+        return tuple(index)
+
+    def _make_neighborhood_index(self, index):
         """
-        Ising 모델의 주변부 원자들은 이웃을 2개 또는 3개만 가지게 된다.
-        periodic b.c.로 모든 원자들이 4개의 이웃을 가지게 하자.
+        한 격자점에 대한 periodic nearest-neighbor index를 만든다.
         """
         index = np.asarray(index)
         neighborhood_index = []
@@ -61,36 +68,77 @@ class State:
 
         return neighborhood_index
 
-    def flip(self, index):
+    def make_neighborhood_table(self):
+        """
+        매 스텝 modulo 연산을 반복하지 않도록 이웃 index를 미리 저장한다.
+        """
+        table_shape = self.state.shape + (2 * self.dim, self.dim)
+        neighborhood_table = np.empty(table_shape, dtype=np.int64)
+
+        for index in np.ndindex(self.size):
+            neighborhood_table[index] = self._make_neighborhood_index(index)
+
+        return neighborhood_table
+
+    def get_neighborhood_index(self, index):
+        """
+        Ising 모델의 주변부 원자들은 이웃을 2개 또는 3개만 가지게 된다.
+        periodic b.c.로 모든 원자들이 4개의 이웃을 가지게 하자.
+        """
+        index = self._normalize_index(index)
+        return [tuple(neighbor) for neighbor in self.neighborhood_table[index]]
+
+    def flip(self, index, energy_diff=None):
+        index = self._normalize_index(index)
         self.state[index] *= -1
+
+        if hasattr(self, "total_energy"):
+            if energy_diff is None:
+                self.total_energy = self.eval_total_energy()
+            else:
+                self.total_energy += energy_diff
+
         return index
+
+    def random_index(self):
+        return tuple(self.rng.integers(0, self.N, (self.dim)))
 
     def random_flip(self):
-        random_index = tuple(self.rng.integers(0, self.N, (self.dim)))
-        return self.flip(random_index)
+        random_index = self.random_index()
+        energy_diff = self.eval_energy_diff_of_flip(random_index)
+        return self.flip(random_index, energy_diff=energy_diff)
 
-    def rollback_flip(self, index):
-        self.flip(index)
-        return index
+    def rollback_flip(self, index, energy_diff=None):
+        if energy_diff is None:
+            return self.flip(index)
+
+        return self.flip(index, energy_diff=-energy_diff)
 
     def eval_total_energy(self):
-        total_energy = 0
-        for index, Si in np.ndenumerate(self.state):
-            neighborhood_index = self.get_neighborhood_index(index)
-            Sj = np.array([self.state[idx] for idx in neighborhood_index])
-            total_energy += self.eval_energy_of_pair(Si, Sj)
-        return 0.5 * total_energy
+        """
+        np.roll을 이용해 모든 nearest-neighbor pair 에너지를 한 번에 계산한다.
+        """
+        neighborhood_spin_sum = np.zeros_like(self.state, dtype=np.int64)
+
+        for axis in range(self.dim):
+            neighborhood_spin_sum += np.roll(self.state, 1, axis=axis)
+            neighborhood_spin_sum += np.roll(self.state, -1, axis=axis)
+
+        return -0.5 * self.J * np.sum(self.state * neighborhood_spin_sum)
+
+    def eval_energy_diff_of_flip(self, index):
+        index = self._normalize_index(index)
+        neighbor_indices = self.neighborhood_table[index]
+        neighbor_spins = self.state[tuple(neighbor_indices.T)]
+
+        return 2 * self.J * self.state[index] * np.sum(neighbor_spins)
 
     def eval_energy_of_pair(self, Si, Sj):
         return -self.J * np.sum(Si * Sj)
 
     def theoretical_lowest_energy(self):
-        if self.dim == 1:
-            return -self.J * 1 / 2 * 2 * 1 * self.N**self.dim
-        elif self.dim == 2:
-            return -self.J * 1 / 2 * 4 * 1 * self.N**self.dim
-        elif self.dim == 3:
-            return -self.J * 1 / 2 * 6 * 1 * self.N**self.dim
+        if self.dim in {1, 2, 3}:
+            return -self.J * self.dim * self.N**self.dim
 
         raise ValueError
 
@@ -103,15 +151,15 @@ def get_snapshot_steps(step_count):
     }
 
 
-def accept_metropolis_flip(model, beta, energy_diff, flipped_index, rng_metropolis):
-    if energy_diff <= 0:
-        return
+def accept_metropolis_flip(model, beta, energy_diff, index, rng_metropolis):
+    if energy_diff > 0:
+        flip_ratio = np.exp(-beta * energy_diff)
 
-    flip_ratio = np.exp(-beta * energy_diff)
-    coin_toss = rng_metropolis.choice([0, 1], size=1, p=[1 - flip_ratio, flip_ratio])[0]
+        if rng_metropolis.random() >= flip_ratio:
+            return False
 
-    if coin_toss == 0:
-        model.rollback_flip(flipped_index)
+    model.flip(index, energy_diff=energy_diff)
+    return True
 
 
 def run_simulation(
@@ -131,7 +179,7 @@ def run_simulation(
 
     steps = np.arange(param["step"])
     energy_history = np.empty_like(steps, dtype=np.int64)
-    energy_history[0] = model.eval_total_energy()
+    energy_history[0] = model.total_energy
     snapshot_steps = get_snapshot_steps(param["step"])
 
     last_completed_step = -1
@@ -144,17 +192,15 @@ def run_simulation(
         for i in steps:
             time.sleep(param["sleep"])
 
-            initial_energy = model.eval_total_energy()
-
-            flipped_index = model.random_flip()
-            final_energy = model.eval_total_energy()
-            energy_diff = final_energy - initial_energy
+            initial_energy = model.total_energy
+            flip_index = model.random_index()
+            energy_diff = model.eval_energy_diff_of_flip(flip_index)
 
             accept_metropolis_flip(
                 model=model,
                 beta=param["beta"],
                 energy_diff=energy_diff,
-                flipped_index=flipped_index,
+                index=flip_index,
                 rng_metropolis=rng_metropolis,
             )
 
